@@ -42,6 +42,28 @@ if not api_key:
 # GenAI 클라이언트 초기화
 client = genai.Client(api_key=api_key)
 
+import time
+from google.genai.errors import APIError
+
+def safe_generate(prompt_text):
+    # 1순위: 최신 기본 모델, 2순위: 트래픽 분산용 경량 모델
+    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    
+    for model_name in models_to_try:
+        for attempt in range(2):  # 모델당 최대 2번 시도
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt_text
+                )
+                return response.text
+            except APIError as e:
+                if e.code == 503:
+                    time.sleep(1.5)  # 1.5초 대기 후 재시도
+                    continue
+                raise e
+    raise Exception("현재 구글 AI 서버 전체에 접속자가 많습니다. 잠시 후 다시 시도해주세요.")
+
 # 사이드바 설정
 with st.sidebar:
     st.title("⚙️ Settings")
