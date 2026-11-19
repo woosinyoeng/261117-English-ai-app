@@ -67,7 +67,7 @@ if len(st.session_state.messages) == 0:
     initial_prompt = f"System: You are an English conversation tutor. Greet the user warmly in English and start a roleplay based on the scenario: {st.session_state.scenario}."
     try:
         response = client.models.generate_content(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             contents=initial_prompt
         )
         ai_greeting = response.text
@@ -96,7 +96,7 @@ if user_input := st.chat_input("Type your message in English..."):
                 full_prompt = f"Scenario: {st.session_state.scenario}\nConversation History:\n{chat_history_str}\n\nRespond to the user naturally in English, correcting grammar if needed, and continue the conversation."
                 
                 response = client.models.generate_content(
-                    model="gemini-2.5-flash",
+                    model="gemini-3.8-flash",
                     contents=full_prompt
                 )
                 ai_response = response.text
