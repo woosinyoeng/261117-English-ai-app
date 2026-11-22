@@ -114,7 +114,9 @@ client = genai.Client(api_key=api_key)
 
 
 def safe_generate(contents_payload) -> str:
-    models_to_try = ["gemini-3.8-flash", "gemini-3.8-flash-lite"]
+    models_to_try = ["gemini-3.8-flash"]
+    last_error = None
+
     for model_name in models_to_try:
         for _ in range(2):
             try:
@@ -124,12 +126,16 @@ def safe_generate(contents_payload) -> str:
                 )
                 return response.text or ""
             except APIError as e:
+                last_error = e
+                if e.code == 404:
+                    # 존재하지 않는 모델명은 재시도하지 않고 바로 탈출
+                    break
                 if e.code in (429, 503):
                     time.sleep(1.5)
                     continue
                 raise e
-    raise RuntimeError("현재 구글 AI 서버 한도 초과 또는 과부하 상태입니다. 잠시 후 다시 시도해주세요.")
 
+    raise RuntimeError(f"모델 호출에 실패했습니다. (마지막 오류: {last_error})")
 
 # 4. 저장된 데이터 복원
 saved = load_saved_data(chat_id)
