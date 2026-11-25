@@ -12,10 +12,17 @@ from google.genai.errors import APIError
 
 st.set_page_config(page_title="AI English Tutor", page_icon="🗣️", layout="centered")
 
-CORRECT_PASSWORD = "1786"
+CORRECT_PASSWORD = "mysecret1234"
 SAVE_DIR = ".chat_history_cache"
 os.makedirs(SAVE_DIR, exist_ok=True)
 TTS_VOICE = "en-US-JennyNeural"
+
+SCENARIO_GREETINGS = {
+    "Free Conversation": "Hi there! How is your day going so far? What would you like to talk about today?",
+    "Ordering at a Cafe": "Welcome to Sunny Cafe! What can I get started for you today?",
+    "Job Interview": "Hello! Thank you for coming in today. Could you start by telling me a little bit about yourself?",
+    "Airport Immigration": "Good morning. May I see your passport and boarding pass, please? What is the purpose of your visit?",
+}
 
 
 @st.cache_resource
@@ -59,8 +66,9 @@ def save_data(chat_id: str, scenario: str, messages: list) -> None:
 
 
 def text_to_speech_bytes(text: str, voice: str = TTS_VOICE) -> bytes | None:
-    """영어 텍스트를 edge-tts로 MP3 바이트로 변환합니다."""
-    clean_text = text.replace("*", "").replace("#", "").strip()
+    # 괄호 안의 한국어/받아쓰기 안내 등은 제외하고 영어 응답 위주로 깔끔하게 읽기
+    lines = [line for line in text.splitlines() if not line.strip().startswith("🎧")]
+    clean_text = " ".join(lines).replace("*", "").replace("#", "").strip()
     if not clean_text:
         return None
 
@@ -118,7 +126,7 @@ def safe_generate(contents_payload) -> str:
     last_error = None
 
     for model_name in models_to_try:
-        for attempt in range(4):  # 최대 4번 시도
+        for attempt in range(4):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -130,12 +138,12 @@ def safe_generate(contents_payload) -> str:
                 if e.code == 404:
                     break
                 if e.code in (429, 503):
-                    wait_sec = 2 * (attempt + 1)  # 2초, 4초, 6초, 8초 대기
-                    time.sleep(wait_sec)
+                    time.sleep(2 * (attempt + 1))
                     continue
                 raise e
 
     raise RuntimeError(f"구글 AI 서버가 바빠 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요. ({last_error})")
+
 
 # 4. 저장된 데이터 복원
 saved = load_saved_data(chat_id)
@@ -149,7 +157,7 @@ if "last_audio_key" not in st.session_state:
 # 5. 사이드바 설정
 with st.sidebar:
     st.title("⚙️ Settings")
-    scenarios = ["Free Conversation", "Ordering at a Cafe", "Job Interview", "Airport Immigration"]
+    scenarios = list(SCENARIO_GREETINGS.keys())
     current_idx = scenarios.index(st.session_state.scenario) if st.session_state.scenario in scenarios else 0
 
     new_scenario = st.selectbox("Choose Scenario", scenarios, index=current_idx)
@@ -176,26 +184,13 @@ with st.sidebar:
 st.title("🗣️ AI English Conversation")
 st.caption(f"Current Scenario: **{st.session_state.scenario}** · Session: `{chat_id}`")
 
-# 6. 첫 인사 생성
+# 6. 첫 인사 (API 호출 없이 고정 인사로 시작해 한도 절약 및 중복 방지)
 if len(st.session_state.messages) == 0:
-    initial_prompt = (
-        f"System: You are an English conversation tutor. Greet the user warmly in English "
-        f"and start a roleplay based on the scenario: {st.session_state.scenario}."
-    )
-    try:
-        ai_greeting = safe_generate(initial_prompt)
-        audio_bytes = text_to_speech_bytes(ai_greeting, voice_choice) if auto_tts else None
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": ai_greeting,
-            "audio_b64": None,
-        })
-        save_data(chat_id, st.session_state.scenario, st.session_state.messages)
-    except Exception as e:
-        st.error(f"API 연결 에러 발생: {e}")
-        st.stop()
+    greeting = SCENARIO_GREETINGS.get(st.session_state.scenario, SCENARIO_GREETINGS["Free Conversation"])
+    st.session_state.messages.append({"role": "assistant", "content": greeting})
+    save_data(chat_id, st.session_state.scenario, st.session_state.messages)
 
-# 7. 기존 대화 출력 + 각 AI 답변 듣기 버튼
+# 7. 기존 대화 출력
 for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
@@ -208,44 +203,57 @@ for idx, message in enumerate(st.session_state.messages):
 mic_audio = st.audio_input("🎙️ 영어로 말해보세요")
 text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
 
-new_user_message = None
-gemini_contents = None
+user_display_text = None
+audio_part = None
 
 if mic_audio is not None:
     audio_raw = mic_audio.getvalue()
     audio_sig = f"{len(audio_raw)}_{hash(audio_raw[:200])}"
     if audio_sig != st.session_state.last_audio_key:
         st.session_state.last_audio_key = audio_sig
-        new_user_message = "🎙️ [음성 메시지 전송됨]"
-        history_text = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages])
-        instruction = (
-            f"Scenario: {st.session_state.scenario}\n"
-            f"Conversation History:\n{history_text}\n\n"
-            "Listen to the user's English audio, briefly note what you heard if helpful, "
-            "gently correct any grammar/phrasing mistakes, and reply naturally in English to continue the conversation."
-        )
-        gemini_contents = [
-            instruction,
-            types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav"),
-        ]
+        user_display_text = "🎙️ (Voice message)"
+        audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
 
 elif text_input:
-    new_user_message = text_input
-    history_text = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages])
-    gemini_contents = (
-        f"Scenario: {st.session_state.scenario}\n"
-        f"Conversation History:\n{history_text}\n\n"
-        "Respond to the user naturally in English, correcting grammar if needed, and continue the conversation."
-    )
+    user_display_text = text_input
 
-if new_user_message and gemini_contents is not None:
-    st.session_state.messages.append({"role": "user", "content": new_user_message})
+if user_display_text is not None:
+    # 1) 먼저 사용자 메시지를 기록에 추가
+    st.session_state.messages.append({"role": "user", "content": user_display_text})
     save_data(chat_id, st.session_state.scenario, st.session_state.messages)
+
     with st.chat_message("user"):
-        st.markdown(new_user_message)
+        st.markdown(user_display_text)
+
+    # 2) 방금 추가한 메시지까지 포함한 전체 대화 이력 구성
+    history_lines = []
+    for m in st.session_state.messages[:-1]:
+        role_label = "Tutor" if m["role"] == "assistant" else "User"
+        history_lines.append(f"{role_label}: {m['content']}")
+    history_text = "\n".join(history_lines)
+
+    if audio_part is not None:
+        prompt_instruction = (
+            f"You are an English conversation tutor in the scenario: '{st.session_state.scenario}'.\n"
+            f"Previous conversation:\n{history_text}\n\n"
+            "The user just replied via voice audio (attached).\n"
+            "1. Start your response with a single line: '🎧 **You said:** \"<transcribe what the user said>\"'\n"
+            "2. Then reply naturally in English to move the conversation forward (do NOT repeat your previous question), "
+            "and briefly give 1 gentle grammar/expression tip if needed."
+        )
+        gemini_contents = [prompt_instruction, audio_part]
+    else:
+        prompt_instruction = (
+            f"You are an English conversation tutor in the scenario: '{st.session_state.scenario}'.\n"
+            f"Previous conversation:\n{history_text}\n\n"
+            f"User's latest message: \"{user_display_text}\"\n\n"
+            "Reply naturally in English to move the conversation forward based on what the user just said "
+            "(do NOT repeat your previous question), and briefly give 1 gentle grammar/expression tip if needed."
+        )
+        gemini_contents = prompt_instruction
 
     with st.chat_message("assistant"):
-        with st.spinner("AI is listening and thinking..."):
+        with st.spinner("AI is thinking..."):
             try:
                 ai_response = safe_generate(gemini_contents)
                 st.markdown(ai_response)
