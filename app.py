@@ -12,7 +12,7 @@ from google.genai.errors import APIError
 
 st.set_page_config(page_title="AI English Tutor", page_icon="🗣️", layout="centered")
 
-CORRECT_PASSWORD = "mysecret1234"
+CORRECT_PASSWORD = "1786"
 SAVE_DIR = ".chat_history_cache"
 os.makedirs(SAVE_DIR, exist_ok=True)
 TTS_VOICE = "en-US-JennyNeural"
