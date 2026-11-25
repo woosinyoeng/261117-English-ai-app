@@ -153,6 +153,8 @@ if "messages" not in st.session_state:
     st.session_state.messages = saved.get("messages", [])
 if "last_audio_key" not in st.session_state:
     st.session_state.last_audio_key = None
+if "mic_key" not in st.session_state:
+    st.session_state.mic_key = 0
 
 # 5. 사이드바 설정
 with st.sidebar:
@@ -200,7 +202,7 @@ for idx, message in enumerate(st.session_state.messages):
                 st.audio(mp3_data, format="audio/mp3", autoplay=True)
 
 # 8. 입력 처리 (마이크 음성 또는 텍스트)
-mic_audio = st.audio_input("🎙️ 영어로 말해보세요")
+mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
 text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
 
 user_display_text = None
@@ -208,11 +210,9 @@ audio_part = None
 
 if mic_audio is not None:
     audio_raw = mic_audio.getvalue()
-    audio_sig = f"{len(audio_raw)}_{hash(audio_raw[:200])}"
-    if audio_sig != st.session_state.last_audio_key:
-        st.session_state.last_audio_key = audio_sig
-        user_display_text = "🎙️ (Voice message)"
-        audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
+    user_display_text = "🎙️ (Voice message)"
+    audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
+    st.session_state.mic_key += 1  # 다음 턴을 위해 마이크 위젯 초기화 준비
 
 elif text_input:
     user_display_text = text_input
