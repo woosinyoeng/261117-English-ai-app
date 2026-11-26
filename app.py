@@ -16,6 +16,7 @@ CORRECT_PASSWORD = "1786"
 SAVE_DIR = ".chat_history_cache"
 os.makedirs(SAVE_DIR, exist_ok=True)
 TTS_VOICE = "en-US-JennyNeural"
+MAX_HISTORY_MESSAGES = 6
 
 SCENARIO_GREETINGS = {
     "Free Conversation": "Hi there! How is your day going so far? What would you like to talk about today?",
@@ -135,7 +136,7 @@ def safe_generate(contents_payload) -> str:
     last_error = None
 
     for model_name in models_to_try:
-        for attempt in range(4):
+        for _ in range(2):
             try:
                 response = client.models.generate_content(
                     model=model_name,
@@ -147,7 +148,7 @@ def safe_generate(contents_payload) -> str:
                 if e.code == 404:
                     break
                 if e.code in (429, 503):
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1.0)
                     continue
                 raise e
 
@@ -184,7 +185,7 @@ with st.sidebar:
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
 
-    auto_tts = st.toggle("AI 답변 자동 음성 재생 (edge-tts)", value=True)
+    auto_tts = st.toggle("AI 답변 자동 음성 재생 (edge-tts)", value=False)
     voice_choice = st.selectbox(
         "Tutor Voice",
         ["en-US-JennyNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"],
@@ -256,8 +257,9 @@ if user_display_text is not None:
     st.session_state.messages.append({"role": "user", "content": user_display_text})
     save_data(chat_id, st.session_state.scenario, st.session_state.messages)
 
+    recent_messages = st.session_state.messages[-(MAX_HISTORY_MESSAGES + 1):-1]
     history_lines = []
-    for m in st.session_state.messages[:-1]:
+    for m in recent_messages:
         role_label = "Tutor" if m["role"] == "assistant" else "User"
         history_lines.append(f"{role_label}: {m['content']}")
     history_text = "\n".join(history_lines)
@@ -265,7 +267,7 @@ if user_display_text is not None:
     if audio_part is not None:
         prompt_instruction = (
             f"You are an English conversation tutor in the scenario: '{st.session_state.scenario}'.\n"
-            f"Previous conversation:\n{history_text}\n\n"
+            f"Recent conversation:\n{history_text}\n\n"
             "The user just replied via voice audio (attached).\n"
             "1. Start your response with a single line: '🎧 **You said:** \"<transcribe what the user said>\"'\n"
             "2. Then reply naturally in English to move the conversation forward (do NOT repeat your previous question), "
@@ -275,7 +277,7 @@ if user_display_text is not None:
     else:
         prompt_instruction = (
             f"You are an English conversation tutor in the scenario: '{st.session_state.scenario}'.\n"
-            f"Previous conversation:\n{history_text}\n\n"
+            f"Recent conversation:\n{history_text}\n\n"
             f"User's latest message: \"{user_display_text}\"\n\n"
             "Reply naturally in English to move the conversation forward based on what the user just said "
             "(do NOT repeat your previous question), and briefly give 1 gentle grammar/expression tip if needed."
@@ -291,7 +293,6 @@ if user_display_text is not None:
             if auto_tts:
                 st.session_state.latest_tts_audio = text_to_speech_bytes(ai_response, voice_choice)
 
-            # 다음 턴을 위해 마이크 위젯 키를 갱신하고 화면을 즉시 새로고침
             st.session_state.mic_key += 1
             st.rerun()
         except Exception as e:
