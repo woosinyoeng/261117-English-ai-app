@@ -37,8 +37,11 @@ def _file_path(chat_id: str) -> str:
 
 def load_saved_data(chat_id: str) -> dict:
     store = get_memory_store()
-    if chat_id in store:
-        return store[chat_id]
+    if chat_id in store and store[chat_id].get("messages"):
+        return {
+            "scenario": store[chat_id].get("scenario", "Free Conversation"),
+            "messages": list(store[chat_id].get("messages", [])),
+        }
 
     path = _file_path(chat_id)
     if os.path.exists(path):
@@ -46,17 +49,24 @@ def load_saved_data(chat_id: str) -> dict:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 store[chat_id] = data
-                return data
+                return {
+                    "scenario": data.get("scenario", "Free Conversation"),
+                    "messages": list(data.get("messages", [])),
+                }
         except Exception:
             pass
 
-    default_data = {"scenario": "Free Conversation", "messages": []}
-    store[chat_id] = default_data
-    return default_data
+    if chat_id in store:
+        return {
+            "scenario": store[chat_id].get("scenario", "Free Conversation"),
+            "messages": list(store[chat_id].get("messages", [])),
+        }
+
+    return {"scenario": "Free Conversation", "messages": []}
 
 
 def save_data(chat_id: str, scenario: str, messages: list) -> None:
-    payload = {"scenario": scenario, "messages": messages}
+    payload = {"scenario": scenario, "messages": list(messages)}
     get_memory_store()[chat_id] = payload
     try:
         with open(_file_path(chat_id), "w", encoding="utf-8") as f:
@@ -66,7 +76,6 @@ def save_data(chat_id: str, scenario: str, messages: list) -> None:
 
 
 def text_to_speech_bytes(text: str, voice: str = TTS_VOICE) -> bytes | None:
-    # 괄호 안의 한국어/받아쓰기 안내 등은 제외하고 영어 응답 위주로 깔끔하게 읽기
     lines = [line for line in text.splitlines() if not line.strip().startswith("🎧")]
     clean_text = " ".join(lines).replace("*", "").replace("#", "").strip()
     if not clean_text:
@@ -145,16 +154,17 @@ def safe_generate(contents_payload) -> str:
     raise RuntimeError(f"구글 AI 서버가 바빠 응답이 지연되고 있습니다. 잠시 후 다시 시도해 주세요. ({last_error})")
 
 
-# 4. 저장된 데이터 복원
-saved = load_saved_data(chat_id)
-if "scenario" not in st.session_state:
+# 4. 저장된 데이터 복원 및 상태 초기화
+if "loaded_chat_id" not in st.session_state or st.session_state.loaded_chat_id != chat_id:
+    saved = load_saved_data(chat_id)
+    st.session_state.loaded_chat_id = chat_id
     st.session_state.scenario = saved.get("scenario", "Free Conversation")
-if "messages" not in st.session_state:
     st.session_state.messages = saved.get("messages", [])
-if "last_audio_key" not in st.session_state:
-    st.session_state.last_audio_key = None
+
 if "mic_key" not in st.session_state:
     st.session_state.mic_key = 0
+if "pending_audio" not in st.session_state:
+    st.session_state.pending_audio = None
 
 # 5. 사이드바 설정
 with st.sidebar:
@@ -166,7 +176,8 @@ with st.sidebar:
     if new_scenario != st.session_state.scenario:
         st.session_state.scenario = new_scenario
         st.session_state.messages = []
-        st.session_state.last_audio_key = None
+        st.session_state.pending_audio = None
+        st.session_state.mic_key += 1
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
 
@@ -177,16 +188,19 @@ with st.sidebar:
         index=0,
     )
 
+    st.caption(f"저장된 메시지 수: {len(st.session_state.messages)}개 · ID: `{chat_id}`")
+
     if st.button("Clear Chat History"):
         st.session_state.messages = []
-        st.session_state.last_audio_key = None
+        st.session_state.pending_audio = None
+        st.session_state.mic_key += 1
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
 
 st.title("🗣️ AI English Conversation")
 st.caption(f"Current Scenario: **{st.session_state.scenario}** · Session: `{chat_id}`")
 
-# 6. 첫 인사 (API 호출 없이 고정 인사로 시작해 한도 절약 및 중복 방지)
+# 6. 첫 인사
 if len(st.session_state.messages) == 0:
     greeting = SCENARIO_GREETINGS.get(st.session_state.scenario, SCENARIO_GREETINGS["Free Conversation"])
     st.session_state.messages.append({"role": "assistant", "content": greeting})
@@ -201,31 +215,33 @@ for idx, message in enumerate(st.session_state.messages):
             if mp3_data:
                 st.audio(mp3_data, format="audio/mp3", autoplay=True)
 
-# 8. 입력 처리 (마이크 음성 또는 텍스트)
-mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
-text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
-
+# 8. 보류 중인 음성 입력이 있으면 먼저 처리
 user_display_text = None
 audio_part = None
 
-if mic_audio is not None:
-    audio_raw = mic_audio.getvalue()
+if st.session_state.pending_audio is not None:
+    audio_raw, audio_mime = st.session_state.pending_audio
+    st.session_state.pending_audio = None
     user_display_text = "🎙️ (Voice message)"
-    audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
-    st.session_state.mic_key += 1  # 다음 턴을 위해 마이크 위젯 초기화 준비
+    audio_part = types.Part.from_bytes(data=audio_raw, mime_type=audio_mime)
+else:
+    mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
+    text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
 
-elif text_input:
-    user_display_text = text_input
+    if mic_audio is not None:
+        st.session_state.pending_audio = (mic_audio.getvalue(), mic_audio.type or "audio/wav")
+        st.session_state.mic_key += 1
+        st.rerun()
+    elif text_input:
+        user_display_text = text_input
 
 if user_display_text is not None:
-    # 1) 먼저 사용자 메시지를 기록에 추가
     st.session_state.messages.append({"role": "user", "content": user_display_text})
     save_data(chat_id, st.session_state.scenario, st.session_state.messages)
 
     with st.chat_message("user"):
         st.markdown(user_display_text)
 
-    # 2) 방금 추가한 메시지까지 포함한 전체 대화 이력 구성
     history_lines = []
     for m in st.session_state.messages[:-1]:
         role_label = "Tutor" if m["role"] == "assistant" else "User"
