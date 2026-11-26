@@ -163,8 +163,8 @@ if "loaded_chat_id" not in st.session_state or st.session_state.loaded_chat_id !
 
 if "mic_key" not in st.session_state:
     st.session_state.mic_key = 0
-if "pending_audio" not in st.session_state:
-    st.session_state.pending_audio = None
+if "processed_audio_id" not in st.session_state:
+    st.session_state.processed_audio_id = None
 
 # 5. 사이드바 설정
 with st.sidebar:
@@ -215,25 +215,24 @@ for idx, message in enumerate(st.session_state.messages):
             if mp3_data:
                 st.audio(mp3_data, format="audio/mp3", autoplay=True)
 
-# 8. 보류 중인 음성 입력이 있으면 먼저 처리
+# 8. 입력 처리 (새로고침 없이 다음 음성 입력이 바로 뜨도록 처리)
 user_display_text = None
 audio_part = None
 
-if st.session_state.pending_audio is not None:
-    audio_raw, audio_mime = st.session_state.pending_audio
-    st.session_state.pending_audio = None
-    user_display_text = "🎙️ (Voice message)"
-    audio_part = types.Part.from_bytes(data=audio_raw, mime_type=audio_mime)
-else:
-    mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
-    text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
+mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
+text_input = st.chat_input("또는 영어로 메시지를 입력하세요...")
 
-    if mic_audio is not None:
-        st.session_state.pending_audio = (mic_audio.getvalue(), mic_audio.type or "audio/wav")
+if mic_audio is not None:
+    audio_raw = mic_audio.getvalue()
+    current_audio_id = f"{len(audio_raw)}_{hash(audio_raw[:128])}_{hash(audio_raw[-128:])}"
+    if current_audio_id != st.session_state.processed_audio_id:
+        st.session_state.processed_audio_id = current_audio_id
         st.session_state.mic_key += 1
-        st.rerun()
-    elif text_input:
-        user_display_text = text_input
+        user_display_text = "🎙️ (Voice message)"
+        audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
+
+elif text_input:
+    user_display_text = text_input
 
 if user_display_text is not None:
     st.session_state.messages.append({"role": "user", "content": user_display_text})
