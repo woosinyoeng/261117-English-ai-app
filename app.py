@@ -101,9 +101,9 @@ def text_to_speech_bytes(text: str, voice: str = TTS_VOICE) -> bytes | None:
         return None
 
 
-# 1. URL 쿼리 파라미터로 chat_id 유지
+# 1. URL 쿼리 파라미터로 chat_id 유지 (없으면 'default' 고정)
 if "chat_id" not in st.query_params or not st.query_params["chat_id"]:
-    st.query_params["chat_id"] = str(uuid.uuid4())[:8]
+    st.query_params["chat_id"] = "default"
 chat_id = str(st.query_params["chat_id"])
 
 # 2. 비밀번호 인증
@@ -165,6 +165,8 @@ if "mic_key" not in st.session_state:
     st.session_state.mic_key = 0
 if "processed_audio_id" not in st.session_state:
     st.session_state.processed_audio_id = None
+if "latest_tts_audio" not in st.session_state:
+    st.session_state.latest_tts_audio = None
 
 # 5. 사이드바 설정
 with st.sidebar:
@@ -176,7 +178,8 @@ with st.sidebar:
     if new_scenario != st.session_state.scenario:
         st.session_state.scenario = new_scenario
         st.session_state.messages = []
-        st.session_state.pending_audio = None
+        st.session_state.processed_audio_id = None
+        st.session_state.latest_tts_audio = None
         st.session_state.mic_key += 1
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
@@ -190,9 +193,20 @@ with st.sidebar:
 
     st.caption(f"저장된 메시지 수: {len(st.session_state.messages)}개 · ID: `{chat_id}`")
 
+    if st.button("➕ 새 대화 시작"):
+        new_id = str(uuid.uuid4())[:8]
+        st.query_params["chat_id"] = new_id
+        st.session_state.loaded_chat_id = None
+        st.session_state.messages = []
+        st.session_state.processed_audio_id = None
+        st.session_state.latest_tts_audio = None
+        st.session_state.mic_key += 1
+        st.rerun()
+
     if st.button("Clear Chat History"):
         st.session_state.messages = []
-        st.session_state.pending_audio = None
+        st.session_state.processed_audio_id = None
+        st.session_state.latest_tts_audio = None
         st.session_state.mic_key += 1
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
@@ -206,6 +220,11 @@ if len(st.session_state.messages) == 0:
     st.session_state.messages.append({"role": "assistant", "content": greeting})
     save_data(chat_id, st.session_state.scenario, st.session_state.messages)
 
+# 방금 생성된 자동 TTS 음성이 있으면 1회 재생
+if st.session_state.latest_tts_audio:
+    st.audio(st.session_state.latest_tts_audio, format="audio/mp3", autoplay=True)
+    st.session_state.latest_tts_audio = None
+
 # 7. 기존 대화 출력
 for idx, message in enumerate(st.session_state.messages):
     with st.chat_message(message["role"]):
@@ -215,7 +234,7 @@ for idx, message in enumerate(st.session_state.messages):
             if mp3_data:
                 st.audio(mp3_data, format="audio/mp3", autoplay=True)
 
-# 8. 입력 처리 (새로고침 없이 다음 음성 입력이 바로 뜨도록 처리)
+# 8. 입력 처리 (마이크 음성 또는 텍스트)
 user_display_text = None
 audio_part = None
 
@@ -227,7 +246,6 @@ if mic_audio is not None:
     current_audio_id = f"{len(audio_raw)}_{hash(audio_raw[:128])}_{hash(audio_raw[-128:])}"
     if current_audio_id != st.session_state.processed_audio_id:
         st.session_state.processed_audio_id = current_audio_id
-        st.session_state.mic_key += 1
         user_display_text = "🎙️ (Voice message)"
         audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
 
@@ -237,9 +255,6 @@ elif text_input:
 if user_display_text is not None:
     st.session_state.messages.append({"role": "user", "content": user_display_text})
     save_data(chat_id, st.session_state.scenario, st.session_state.messages)
-
-    with st.chat_message("user"):
-        st.markdown(user_display_text)
 
     history_lines = []
     for m in st.session_state.messages[:-1]:
@@ -267,17 +282,17 @@ if user_display_text is not None:
         )
         gemini_contents = prompt_instruction
 
-    with st.chat_message("assistant"):
-        with st.spinner("AI is thinking..."):
-            try:
-                ai_response = safe_generate(gemini_contents)
-                st.markdown(ai_response)
-                st.session_state.messages.append({"role": "assistant", "content": ai_response})
-                save_data(chat_id, st.session_state.scenario, st.session_state.messages)
+    with st.spinner("AI is thinking..."):
+        try:
+            ai_response = safe_generate(gemini_contents)
+            st.session_state.messages.append({"role": "assistant", "content": ai_response})
+            save_data(chat_id, st.session_state.scenario, st.session_state.messages)
 
-                if auto_tts:
-                    mp3_data = text_to_speech_bytes(ai_response, voice_choice)
-                    if mp3_data:
-                        st.audio(mp3_data, format="audio/mp3", autoplay=True)
-            except Exception as e:
-                st.error(f"응답 생성 중 에러가 발생했습니다: {e}")
+            if auto_tts:
+                st.session_state.latest_tts_audio = text_to_speech_bytes(ai_response, voice_choice)
+
+            # 다음 턴을 위해 마이크 위젯 키를 갱신하고 화면을 즉시 새로고침
+            st.session_state.mic_key += 1
+            st.rerun()
+        except Exception as e:
+            st.error(f"응답 생성 중 에러가 발생했습니다: {e}")
