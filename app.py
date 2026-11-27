@@ -8,9 +8,12 @@ import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import edge_tts
 import streamlit as st
+import streamlit.components.v1 as components
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
@@ -213,6 +216,16 @@ def apply_theme(dark: bool) -> None:
     # 빈 줄/들여쓰기가 있으면 마크다운 파서가 <style>을 중간에 끊을 수 있어 한 줄로 압축
     css = " ".join(line.strip() for line in css.splitlines() if line.strip())
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
+    # 마크다운 <style>이 적용되지 않는 환경을 대비해, 페이지 <head>에 직접 주입 (rerun 때마다 내용만 교체)
+    components.html(
+        "<script>"
+        "const d = window.parent.document;"
+        "let s = d.getElementById('app-theme-style');"
+        "if (!s) { s = d.createElement('style'); s.id = 'app-theme-style'; d.head.appendChild(s); }"
+        f"s.textContent = {json.dumps(css)};"
+        "</script>",
+        height=0,
+    )
 
 
 # ──────────────────────────────────────────────
@@ -264,6 +277,45 @@ def save_data(chat_id: str, scenario: str, messages: list) -> None:
     try:
         with open(_file_path(chat_id), "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def list_saved_chats(limit: int = 20) -> list:
+    """저장된 대화 파일들을 최근 순으로 읽어 요약 정보를 반환."""
+    items = []
+    try:
+        names = os.listdir(SAVE_DIR)
+    except Exception:
+        return items
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(SAVE_DIR, name)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            messages = data.get("messages", [])
+            first_user = next((m.get("content", "") for m in messages if m.get("role") == "user"), "")
+            items.append(
+                {
+                    "id": name[:-5],
+                    "scenario": data.get("scenario", "Free Conversation"),
+                    "count": len(messages),
+                    "preview": first_user.replace("\n", " ").strip(),
+                    "mtime": os.path.getmtime(path),
+                }
+            )
+        except Exception:
+            continue
+    items.sort(key=lambda x: x["mtime"], reverse=True)
+    return items[:limit]
+
+
+def delete_chat(target_id: str) -> None:
+    get_memory_store().pop(target_id, None)
+    try:
+        os.remove(_file_path(target_id))
     except Exception:
         pass
 
@@ -390,11 +442,17 @@ client = genai.Client(api_key=api_key)
 def stream_generate(contents_payload, system_prompt: str):
     """답변을 글자 단위로 스트리밍. 모델/설정 문제 시 자동 폴백."""
     base = dict(system_instruction=system_prompt, max_output_tokens=400, temperature=0.7)
-    configs = [
+    configs = []
+    try:
         # 1순위: 생각(thinking) 끄기 → 가장 빠름
-        types.GenerateContentConfig(**base, thinking_config=types.ThinkingConfig(thinking_budget=0)),
-        # 2순위: 모델이 thinking 설정을 지원하지 않을 때
-        types.GenerateContentConfig(**base),
+        configs.append(
+            types.GenerateContentConfig(**base, thinking_config=types.ThinkingConfig(thinking_budget=0))
+        )
+    except Exception:
+        pass
+    configs += [
+        # 2순위: 모델이 thinking 설정을 지원하지 않거나 빈 응답이 올 때
+        types.GenerateContentConfig(system_instruction=system_prompt, max_output_tokens=1500, temperature=0.7),
     ]
     last_error = None
 
@@ -410,7 +468,12 @@ def stream_generate(contents_payload, system_prompt: str):
                         if chunk.text:
                             started = True
                             yield chunk.text
-                    return
+                    if started:
+                        st.session_state.last_model = model_name
+                        return
+                    # 에러는 없는데 텍스트가 비어 있는 경우 → 다음 설정/모델로 재시도
+                    last_error = RuntimeError(f"{model_name}: 빈 응답")
+                    break
                 except APIError as e:
                     last_error = e
                     if started:
@@ -420,6 +483,11 @@ def stream_generate(contents_payload, system_prompt: str):
                         continue
                     if e.code == 404:
                         model_missing = True
+                    break
+                except Exception as e:
+                    last_error = e
+                    if started:
+                        raise
                     break
             if model_missing:
                 break
@@ -439,6 +507,17 @@ if "loaded_chat_id" not in st.session_state or st.session_state.loaded_chat_id !
 st.session_state.setdefault("mic_key", 0)
 st.session_state.setdefault("processed_audio_id", None)
 st.session_state.setdefault("latest_tts_audio", None)
+
+
+def switch_chat(new_id: str) -> None:
+    """다른 대화로 전환 (저장된 내용은 위의 복원 로직이 불러옴)."""
+    st.query_params["chat_id"] = new_id
+    st.session_state.loaded_chat_id = None
+    st.session_state.processed_audio_id = None
+    st.session_state.latest_tts_audio = None
+    st.session_state.mic_key += 1
+    st.rerun()
+
 
 # ──────────────────────────────────────────────
 # 사이드바
@@ -474,7 +553,8 @@ with st.sidebar:
         index=0,
     )
 
-    st.caption(f"저장된 메시지 수: {len(st.session_state.messages)}개 · ID: `{chat_id}`")
+    st.caption(f"현재 대화 메시지: {len(st.session_state.messages)}개 · ID: `{chat_id}`")
+    st.caption(f"최근 응답 모델: {st.session_state.get('last_model', '-')}")
 
     if st.button("➕ 새 대화 시작"):
         new_id = str(uuid.uuid4())[:8]
@@ -494,6 +574,31 @@ with st.sidebar:
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
 
+    st.divider()
+    st.markdown("##### 📚 이전 대화")
+    saved_chats = [c for c in list_saved_chats() if c["count"] > 1 or c["id"] == chat_id]
+    if not saved_chats:
+        st.caption("아직 저장된 대화가 없어요.")
+    for c in saved_chats:
+        is_current = c["id"] == chat_id
+        icon = SCENARIO_ICONS.get(c["scenario"], "💬")
+        preview = c["preview"] or "새 대화"
+        if len(preview) > 14:
+            preview = preview[:14] + "…"
+        when = datetime.fromtimestamp(c["mtime"], ZoneInfo("Asia/Seoul")).strftime("%m/%d %H:%M")
+        label = f"{'▶ ' if is_current else ''}{icon} {preview} · {when}"
+
+        col_open, col_del = st.columns([5, 1])
+        if col_open.button(label, key=f"open_{c['id']}", use_container_width=True, help=f"메시지 {c['count']}개"):
+            if not is_current:
+                switch_chat(c["id"])
+        if col_del.button("🗑", key=f"del_{c['id']}", help="이 대화 삭제"):
+            delete_chat(c["id"])
+            if is_current:
+                switch_chat(str(uuid.uuid4())[:8])
+            else:
+                st.rerun()
+
 apply_theme(dark_mode)
 
 # ──────────────────────────────────────────────
@@ -504,7 +609,7 @@ st.markdown(
     f"""
     <div class="hero">
         <div class="hero-title">🌸 AI English Conversation</div>
-        <div class="hero-sub">말하고, 듣고, 편하게 연습해요</div>
+        <div class="hero-sub">Practice is perfect</div>
         <span class="chip">{scenario_icon} {html.escape(st.session_state.scenario)}</span>
         <span class="chip">Session {html.escape(chat_id)}</span>
     </div>
@@ -565,16 +670,16 @@ pending_text = st.session_state.pop("pending_text", None)
 mic_audio = st.audio_input("🎙️ 영어로 말해보세요", key=f"mic_{st.session_state.mic_key}")
 text_input = st.chat_input("또는 영어로 메시지를 입력하세요...") or pending_text
 
-if mic_audio is not None:
+if text_input:
+    user_display_text = text_input
+
+elif mic_audio is not None:
     audio_raw = mic_audio.getvalue()
     current_audio_id = hashlib.md5(audio_raw).hexdigest()
     if current_audio_id != st.session_state.processed_audio_id:
         st.session_state.processed_audio_id = current_audio_id
         user_display_text = "🎙️ (Voice message)"
         audio_part = types.Part.from_bytes(data=audio_raw, mime_type=mic_audio.type or "audio/wav")
-
-elif text_input:
-    user_display_text = text_input
 
 if user_display_text is not None:
     chips_slot.empty()
