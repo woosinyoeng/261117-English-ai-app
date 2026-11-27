@@ -26,6 +26,10 @@ st.set_page_config(page_title="AI English Tutor", page_icon="🌸", layout="cent
 SAVE_DIR = ".chat_history_cache"
 os.makedirs(SAVE_DIR, exist_ok=True)
 
+REVIEW_DIR = ".review_cache"
+os.makedirs(REVIEW_DIR, exist_ok=True)
+REVIEW_FILE = os.path.join(REVIEW_DIR, "notes.json")
+
 TTS_VOICE = "en-US-JennyNeural"
 MAX_HISTORY_MESSAGES = 6
 
@@ -33,6 +37,9 @@ MAX_HISTORY_MESSAGES = 6
 MODEL_CANDIDATES = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 
 SCENARIO_GREETINGS = {
+    "Overseas Buyer Meeting": "Hello, nice to meet you! I'm interested in your brand. Could you briefly introduce your best-selling product?",
+    "Pop-up Store Guest": "Hi! This pop-up store looks so pretty. Can you tell me what this product is?",
+    "Design Reference Talk": "Thanks for sharing the draft. Could you walk me through the concept behind this design?",
     "Free Conversation": "Hi there! How is your day going so far? What would you like to talk about today?",
     "Ordering at a Cafe": "Welcome to Sunny Cafe! What can I get started for you today?",
     "Job Interview": "Hello! Thank you for coming in today. Could you start by telling me a little bit about yourself?",
@@ -40,6 +47,9 @@ SCENARIO_GREETINGS = {
 }
 
 SCENARIO_ICONS = {
+    "Overseas Buyer Meeting": "🤝",
+    "Pop-up Store Guest": "🛍️",
+    "Design Reference Talk": "🎨",
     "Free Conversation": "💬",
     "Ordering at a Cafe": "☕",
     "Job Interview": "💼",
@@ -48,11 +58,66 @@ SCENARIO_ICONS = {
 
 # 첫 인사 아래에 보여줄 추천 답변 (초보자용)
 SCENARIO_SUGGESTIONS = {
+    "Overseas Buyer Meeting": [
+        "It's our best-selling scalp care product.",
+        "We focus on gentle, natural ingredients.",
+        "Let me show you our catalog.",
+    ],
+    "Pop-up Store Guest": [
+        "It's a toner pad for sensitive skin.",
+        "Would you like to try a sample?",
+        "What's your skin type?",
+    ],
+    "Design Reference Talk": [
+        "We used soft pastel colors.",
+        "The concept is clean and gentle.",
+        "The target is women in their twenties.",
+    ],
     "Free Conversation": ["I'm doing great, thanks!", "I'm a bit tired today.", "Let's talk about travel."],
     "Ordering at a Cafe": ["Can I have an iced latte, please?", "What do you recommend?", "I'd like a slice of cake."],
     "Job Interview": ["I'm a marketing designer.", "I have three years of experience.", "I'm a quick learner."],
     "Airport Immigration": ["Here is my passport.", "I'm here for sightseeing.", "I'll stay for five days."],
 }
+
+# 직무 맞춤 시나리오에서 AI가 맡을 역할
+SCENARIO_ROLES = {
+    "Overseas Buyer Meeting": (
+        "Role-play as an overseas beauty retail buyer (for example from a drugstore chain in Southeast Asia or Taiwan) "
+        "meeting a Korean cosmetics brand's marketing/design team member. "
+        "Ask about products, key ingredients, packaging design, pricing, minimum order quantity, promotion plans and marketing materials."
+    ),
+    "Pop-up Store Guest": (
+        "Role-play as a curious foreign tourist visiting a Korean cosmetics pop-up store. "
+        "Ask about products, skin type recommendations, scents, textures, events, free samples, prices and how to use them."
+    ),
+    "Design Reference Talk": (
+        "Role-play as an overseas marketing partner reviewing the learner's banner and detail-page design drafts. "
+        "Ask about the concept, color palette, typography and target customers, and politely request revisions."
+    ),
+}
+
+
+def build_system_prompt(scenario: str, short_mode: bool) -> str:
+    role = SCENARIO_ROLES.get(scenario)
+    if role:
+        intro = (
+            f"{role} Stay in character, but use simple, clear English for an intermediate learner. "
+            "The learner is a Korean cosmetics marketing designer practicing for real work situations."
+        )
+    else:
+        intro = f"You are a friendly English conversation tutor. Current scenario: '{scenario}'."
+
+    if short_mode:
+        length = "Reply with ONE or TWO short sentences and ask only ONE short question at a time."
+    else:
+        length = "Reply in 2-3 short, natural sentences to keep the conversation moving."
+
+    return (
+        f"{intro} {length} "
+        "Never repeat your previous question. "
+        "If the learner made a notable mistake, add one very brief tip in Korean on a new line starting with '💡'."
+    )
+
 
 USER_AVATAR = "💜"
 TUTOR_AVATAR = "🌸"
@@ -217,15 +282,21 @@ def apply_theme(dark: bool) -> None:
     css = " ".join(line.strip() for line in css.splitlines() if line.strip())
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
     # 마크다운 <style>이 적용되지 않는 환경을 대비해, 페이지 <head>에 직접 주입 (rerun 때마다 내용만 교체)
-    components.html(
+    script = (
         "<script>"
         "const d = window.parent.document;"
         "let s = d.getElementById('app-theme-style');"
         "if (!s) { s = d.createElement('style'); s.id = 'app-theme-style'; d.head.appendChild(s); }"
         f"s.textContent = {json.dumps(css)};"
-        "</script>",
-        height=0,
+        "</script>"
     )
+    try:
+        if hasattr(st, "iframe"):  # 최신 Streamlit (components.html은 곧 제거 예정)
+            st.iframe(script, height=1)
+        else:
+            components.html(script, height=0)
+    except Exception:
+        pass  # 실패해도 위의 <style> 주입이 있으니 앱은 계속 동작
 
 
 # ──────────────────────────────────────────────
@@ -334,7 +405,7 @@ def _run_async(coro_factory):
 
 
 def text_to_speech_bytes(text: str, voice: str = TTS_VOICE) -> bytes | None:
-    lines = [line for line in text.splitlines() if not line.strip().startswith("🎧")]
+    lines = [line for line in text.splitlines() if not line.strip().startswith(("🎧", "💡"))]
     clean_text = " ".join(lines).replace("*", "").replace("#", "").strip()
     if not clean_text:
         return None
@@ -496,6 +567,194 @@ def stream_generate(contents_payload, system_prompt: str):
 
 
 # ──────────────────────────────────────────────
+# 힌트 / 복습 문장
+# ──────────────────────────────────────────────
+def generate_json(prompt: str, system: str) -> dict:
+    """Gemini가 JSON으로 답하게 하고 파싱해서 반환. 모델/설정 폴백 포함."""
+    cfgs = []
+    try:
+        cfgs.append(
+            types.GenerateContentConfig(
+                system_instruction=system,
+                temperature=0.4,
+                max_output_tokens=800,
+                response_mime_type="application/json",
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            )
+        )
+    except Exception:
+        pass
+    cfgs.append(
+        types.GenerateContentConfig(
+            system_instruction=system,
+            temperature=0.4,
+            max_output_tokens=2500,
+            response_mime_type="application/json",
+        )
+    )
+
+    last_error = None
+    for model_name in MODEL_CANDIDATES:
+        for cfg in cfgs:
+            try:
+                resp = client.models.generate_content(model=model_name, contents=prompt, config=cfg)
+                text = (resp.text or "").strip()
+                if text.startswith("```"):
+                    text = text.strip("`").strip()
+                    if text.lower().startswith("json"):
+                        text = text[4:].strip()
+                if not text:
+                    last_error = RuntimeError(f"{model_name}: 빈 응답")
+                    continue
+                data = json.loads(text)
+                st.session_state.last_model = model_name
+                return data
+            except APIError as e:
+                last_error = e
+                if e.code in (429, 503):
+                    time.sleep(1.5)
+                if e.code == 404:
+                    break
+            except Exception as e:
+                last_error = e
+    raise RuntimeError(f"AI 응답을 가져오지 못했어요. 잠시 후 다시 시도해 주세요. ({last_error})")
+
+
+def get_hints(korean_text: str, last_tutor: str, scenario: str) -> list:
+    system = "You are a supportive English coach for a Korean learner. Output valid JSON only."
+    idea = korean_text.strip() or "(the learner has no idea what to say; suggest good replies)"
+    prompt = (
+        f"Scenario: {scenario}\n"
+        f'The other person just said: "{last_tutor}"\n'
+        f'The learner wants to say this (rough idea in Korean): "{idea}"\n\n'
+        "Give exactly 3 natural English replies the learner can say next, each at most 2 short sentences: "
+        "(1) simplest, (2) natural and polite, (3) a bit richer. "
+        'Return JSON: {"options":[{"level":"쉬움","en":"...","ko":"한국어 뜻"},'
+        '{"level":"자연스럽게","en":"...","ko":"..."},{"level":"풍부하게","en":"...","ko":"..."}]}'
+    )
+    data = generate_json(prompt, system)
+    options = data.get("options", []) if isinstance(data, dict) else []
+    return [o for o in options if isinstance(o, dict) and o.get("en")]
+
+
+def load_reviews() -> list:
+    try:
+        with open(REVIEW_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def save_reviews(items: list) -> None:
+    try:
+        with open(REVIEW_FILE, "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
+
+
+def add_reviews(new_items: list, scenario: str) -> int:
+    items = load_reviews()
+    existing = {str(i.get("en", "")).strip().lower() for i in items}
+    today = datetime.now(ZoneInfo("Asia/Seoul")).strftime("%Y-%m-%d")
+    added = 0
+    for n in new_items:
+        if not isinstance(n, dict):
+            continue
+        en = str(n.get("en", "")).strip()
+        if not en or en.lower() in existing:
+            continue
+        items.append(
+            {
+                "id": uuid.uuid4().hex[:8],
+                "en": en,
+                "ko": str(n.get("ko", "")).strip(),
+                "note": str(n.get("note", "")).strip(),
+                "scenario": scenario,
+                "created": today,
+                "reviewed": 0,
+            }
+        )
+        existing.add(en.lower())
+        added += 1
+    save_reviews(items)
+    return added
+
+
+def pick_today_reviews(items: list, n: int = 5) -> list:
+    """아직 졸업(3회 외움)하지 않은 문장 중 덜 복습한 것/오래된 것부터 n개."""
+    active = [i for i in items if i.get("reviewed", 0) < 3]
+    active.sort(key=lambda i: (i.get("reviewed", 0), i.get("created", "")))
+    return active[:n]
+
+
+def mark_reviewed(item_id: str) -> None:
+    items = load_reviews()
+    for it in items:
+        if it.get("id") == item_id:
+            it["reviewed"] = it.get("reviewed", 0) + 1
+    save_reviews(items)
+
+
+def delete_review(item_id: str) -> None:
+    save_reviews([i for i in load_reviews() if i.get("id") != item_id])
+
+
+def extract_and_save_reviews(messages: list, scenario: str) -> int:
+    lines = []
+    for m in messages[-16:]:
+        label = "Tutor" if m["role"] == "assistant" else "Learner"
+        lines.append(f"{label}: {m['content']}")
+    transcript = "\n".join(lines)
+    system = "You are an English tutor for a Korean learner. Output valid JSON only."
+    prompt = (
+        f"Scenario: {scenario}\n"
+        f"Conversation:\n{transcript}\n\n"
+        "Pick up to 5 short sentences (under 15 words each) worth reviewing: improved or corrected versions "
+        "of the learner's own sentences, and useful expressions from the tutor that the learner can reuse in this scenario. "
+        'Return JSON: {"items":[{"en":"English sentence","ko":"한국어 뜻","note":"짧은 한국어 설명"}]}'
+    )
+    data = generate_json(prompt, system)
+    items = data.get("items", []) if isinstance(data, dict) else []
+    return add_reviews(items, scenario)
+
+
+def render_review_panel() -> None:
+    reviews = load_reviews()
+    if not reviews:
+        return
+    due = pick_today_reviews(reviews)
+    with st.expander(f"🔁 오늘의 복습 문장 ({len(due)}개 · 전체 {len(reviews)}개)", expanded=False):
+        if not due:
+            st.caption("🎉 오늘 복습할 문장을 모두 외웠어요! 새 대화에서 또 뽑아 보세요.")
+        else:
+            st.caption("한국어를 보고 영어로 말해 본 뒤 '영어 보기'로 확인하세요. '외웠어요'를 3번 누르면 졸업!")
+        for it in due:
+            st.markdown(f"**{it.get('ko') or '(뜻 없음)'}**")
+            c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
+            show_key = f"rv_show_{it['id']}"
+            if c1.button("👀 영어 보기", key=f"rv_btn_show_{it['id']}", use_container_width=True):
+                st.session_state[show_key] = not st.session_state.get(show_key, False)
+            if c2.button("✅ 외웠어요", key=f"rv_btn_done_{it['id']}", use_container_width=True):
+                mark_reviewed(it["id"])
+                st.rerun()
+            play = c3.button("🔊", key=f"rv_btn_play_{it['id']}")
+            if c4.button("🗑", key=f"rv_btn_del_{it['id']}"):
+                delete_review(it["id"])
+                st.rerun()
+            if st.session_state.get(show_key):
+                st.markdown(f"> {it['en']}")
+                if it.get("note"):
+                    st.caption(it["note"])
+            if play:
+                mp3 = tts_cached(it["en"], voice_choice)
+                if mp3:
+                    st.audio(mp3, format="audio/mp3", autoplay=True)
+            st.divider()
+
+
+# ──────────────────────────────────────────────
 # 저장된 데이터 복원 및 상태 초기화
 # ──────────────────────────────────────────────
 if "loaded_chat_id" not in st.session_state or st.session_state.loaded_chat_id != chat_id:
@@ -507,10 +766,13 @@ if "loaded_chat_id" not in st.session_state or st.session_state.loaded_chat_id !
 st.session_state.setdefault("mic_key", 0)
 st.session_state.setdefault("processed_audio_id", None)
 st.session_state.setdefault("latest_tts_audio", None)
+st.session_state.setdefault("hint_result", None)
+st.session_state.setdefault("hint_key", 0)
 
 
 def switch_chat(new_id: str) -> None:
     """다른 대화로 전환 (저장된 내용은 위의 복원 로직이 불러옴)."""
+    st.session_state.hint_result = None
     st.query_params["chat_id"] = new_id
     st.session_state.loaded_chat_id = None
     st.session_state.processed_audio_id = None
@@ -547,6 +809,7 @@ with st.sidebar:
         st.rerun()
 
     auto_tts = st.toggle("AI 답변 자동 음성 재생 (edge-tts)", value=False)
+    short_mode = st.toggle("✂️ 짧게, 한 번에 한 문장씩", value=True)
     voice_choice = st.selectbox(
         "Tutor Voice",
         ["en-US-JennyNeural", "en-US-GuyNeural", "en-GB-SoniaNeural"],
@@ -573,6 +836,23 @@ with st.sidebar:
         st.session_state.mic_key += 1
         save_data(chat_id, st.session_state.scenario, st.session_state.messages)
         st.rerun()
+
+    st.divider()
+    st.markdown("##### 🔁 복습 문장")
+    if st.button("📝 이 대화에서 복습 문장 뽑기", use_container_width=True):
+        user_turns = [m for m in st.session_state.messages if m["role"] == "user"]
+        if not user_turns:
+            st.warning("먼저 대화를 조금 해보세요!")
+        else:
+            with st.spinner("복습 문장 고르는 중..."):
+                try:
+                    added = extract_and_save_reviews(st.session_state.messages, st.session_state.scenario)
+                    if added:
+                        st.success(f"{added}개 저장했어요! 위쪽 '오늘의 복습 문장'에서 확인하세요.")
+                    else:
+                        st.info("새로 저장할 문장이 없었어요 (이미 저장됐거나 비어 있어요).")
+                except Exception as e:
+                    st.error(f"복습 문장 생성에 실패했어요: {e}")
 
     st.divider()
     st.markdown("##### 📚 이전 대화")
@@ -609,13 +889,15 @@ st.markdown(
     f"""
     <div class="hero">
         <div class="hero-title">🌸 AI English Conversation</div>
-        <div class="hero-sub">Practice is perfect</div>
+        <div class="hero-sub">말하고, 듣고, 편하게 연습해요</div>
         <span class="chip">{scenario_icon} {html.escape(st.session_state.scenario)}</span>
         <span class="chip">Session {html.escape(chat_id)}</span>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
+render_review_panel()
 
 # ──────────────────────────────────────────────
 # 첫 인사
@@ -661,6 +943,40 @@ if len(st.session_state.messages) == 1:
                     st.rerun()
 
 # ──────────────────────────────────────────────
+# 🆘 막힐 때: 한국어로 말하고 영어 힌트 받기
+# ──────────────────────────────────────────────
+with st.expander("🆘 막힐 때: 한국어로 말하고 영어 힌트 받기", expanded=bool(st.session_state.hint_result)):
+    hint_ko = st.text_area(
+        "한국어로 대충 말해보세요 (비워두면 추천 답변을 드려요)",
+        key=f"hint_ko_{st.session_state.hint_key}",
+        height=80,
+        placeholder="예: 이 제품은 민감한 피부에도 순하고 향이 은은하다고 말하고 싶어요",
+    )
+    if st.button("💡 힌트 받기", key="hint_btn"):
+        last_tutor = next(
+            (m["content"] for m in reversed(st.session_state.messages) if m["role"] == "assistant"), ""
+        )
+        last_tutor = "\n".join(
+            ln for ln in last_tutor.splitlines() if not ln.strip().startswith(("🎧", "💡"))
+        )
+        with st.spinner("힌트 만드는 중..."):
+            try:
+                st.session_state.hint_result = get_hints(hint_ko, last_tutor, st.session_state.scenario)
+            except Exception as e:
+                st.session_state.hint_result = None
+                st.error(f"힌트를 가져오지 못했어요: {e}")
+
+    for i, opt in enumerate(st.session_state.hint_result or []):
+        st.markdown(f"**{opt.get('level', '')}** · {opt.get('en', '')}")
+        if opt.get("ko"):
+            st.caption(opt["ko"])
+        if st.button("➡️ 이 문장으로 말하기", key=f"hint_use_{i}"):
+            st.session_state.pending_text = opt["en"]
+            st.session_state.hint_result = None
+            st.session_state.hint_key += 1
+            st.rerun()
+
+# ──────────────────────────────────────────────
 # 입력 처리 (마이크 음성 / 텍스트 / 추천 칩)
 # ──────────────────────────────────────────────
 user_display_text = None
@@ -694,12 +1010,7 @@ if user_display_text is not None:
         history_lines.append(f"{role_label}: {m['content']}")
     history_text = "\n".join(history_lines)
 
-    system_prompt = (
-        f"You are a friendly English conversation tutor. Current scenario: '{st.session_state.scenario}'. "
-        "Reply in 2-3 short, natural sentences to keep the conversation moving. "
-        "Never repeat your previous question. "
-        "If needed, add at most ONE brief, gentle grammar or expression tip at the end."
-    )
+    system_prompt = build_system_prompt(st.session_state.scenario, short_mode)
 
     if audio_part is not None:
         prompt_instruction = (
@@ -732,6 +1043,7 @@ if user_display_text is not None:
                 st.session_state.latest_tts_audio = tts_cached(ai_response, voice_choice)
 
             st.session_state.mic_key += 1
+            st.session_state.hint_result = None
             st.rerun()
         except Exception as e:
             st.error(f"응답 생성 중 에러가 발생했습니다: {e}")
