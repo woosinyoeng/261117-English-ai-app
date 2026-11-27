@@ -74,33 +74,39 @@ THEMES = {
         "shadow": "rgba(168, 130, 230, 0.15)",
     },
     "dark": {
-        "bg1": "#1a1524",
-        "bg2": "#241a33",
-        "text": "#f0e9fa",
-        "muted": "#a99bc0",
-        "sidebar": "#15101e",
-        "card": "#2a2139",
-        "border": "#40335a",
-        "user-bg": "#4a2a47",
-        "user-border": "#6b3d66",
+        "bg1": "#1c1c1e",
+        "bg2": "#232325",
+        "text": "#f2f2f7",
+        "muted": "#a1a1a6",
+        "sidebar": "#161618",
+        "card": "#2c2c2e",
+        "border": "#3a3a3c",
+        "user-bg": "#3a3a3c",
+        "user-border": "#4a4a4d",
         "accent": "#c4a1ff",
         "accent2": "#ff9ccf",
-        "input-bg": "#2a2139",
-        "shadow": "rgba(0, 0, 0, 0.35)",
+        "input-bg": "#2c2c2e",
+        "shadow": "rgba(0, 0, 0, 0.4)",
     },
 }
 
 STATIC_CSS = """
-.stApp, [data-testid="stAppViewContainer"] {
+html, body, .stApp, [data-testid="stApp"], [data-testid="stAppViewContainer"] {
     background: linear-gradient(160deg, var(--bg1) 0%, var(--bg2) 100%) !important;
-    color: var(--text);
+    background-attachment: fixed !important;
+    color: var(--text) !important;
 }
-[data-testid="stHeader"] { background: transparent !important; }
-[data-testid="stBottom"], [data-testid="stBottom"] > div { background: transparent !important; }
-[data-testid="stSidebar"] {
+[data-testid="stMain"], [data-testid="stMainBlockContainer"], section.main, .main {
+    background: transparent !important;
+}
+[data-testid="stHeader"], [data-testid="stToolbar"] { background: transparent !important; }
+[data-testid="stBottom"], [data-testid="stBottom"] > div, [data-testid="stBottomBlockContainer"] {
+    background: transparent !important;
+}
+[data-testid="stSidebar"], [data-testid="stSidebar"] > div, [data-testid="stSidebarContent"] {
     background: var(--sidebar) !important;
-    border-right: 1px solid var(--border);
 }
+[data-testid="stSidebar"] { border-right: 1px solid var(--border); }
 .block-container { max-width: 760px; padding-top: 2.2rem; padding-bottom: 6rem; }
 
 h1, h2, h3, h4, p, li, label,
@@ -124,18 +130,18 @@ h1, h2, h3, h4, p, li, label,
 }
 
 /* 말풍선 */
-[data-testid="stChatMessage"] {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 20px;
-    padding: 14px 18px;
+[data-testid="stChatMessage"], .stChatMessage {
+    background: var(--card) !important;
+    border: 1px solid var(--border) !important;
+    border-radius: 20px !important;
+    padding: 14px 18px !important;
     margin-bottom: 12px;
     box-shadow: 0 4px 14px var(--shadow);
 }
 [data-testid="stChatMessage"]:has([data-testid="stChatMessageAvatarUser"]),
 [data-testid="stChatMessage"]:has([data-testid="chatAvatarIcon-user"]) {
-    background: var(--user-bg);
-    border-color: var(--user-border);
+    background: var(--user-bg) !important;
+    border-color: var(--user-border) !important;
 }
 
 /* 입력창 */
@@ -203,10 +209,10 @@ def apply_theme(dark: bool) -> None:
     palette = THEMES["dark" if dark else "light"]
     variables = "\n".join(f"--{k}: {v};" for k, v in palette.items())
     scheme = "dark" if dark else "light"
-    st.markdown(
-        f"<style>:root {{ {variables} color-scheme: {scheme}; }}\n{STATIC_CSS}</style>",
-        unsafe_allow_html=True,
-    )
+    css = f":root {{ {variables} color-scheme: {scheme}; }} {STATIC_CSS}"
+    # 빈 줄/들여쓰기가 있으면 마크다운 파서가 <style>을 중간에 끊을 수 있어 한 줄로 압축
+    css = " ".join(line.strip() for line in css.splitlines() if line.strip())
+    st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
 
 # ──────────────────────────────────────────────
@@ -350,12 +356,20 @@ if not st.session_state.authenticated:
     )
     correct_password = get_secret("APP_PASSWORD")
     if not correct_password:
-        st.error("⚠️ APP_PASSWORD가 Streamlit Secrets에 설정되지 않았습니다.")
-        st.stop()
+        try:
+            found = ", ".join(st.secrets.keys()) or "(없음)"
+        except Exception:
+            found = "(secrets를 읽을 수 없음)"
+        st.error(
+            "⚠️ APP_PASSWORD를 찾지 못했어요. Secrets에 `APP_PASSWORD = \"비밀번호\"` 형태로 "
+            f"저장했는지, 저장 후 앱을 Reboot 했는지 확인해 주세요. (현재 인식된 키: {found})"
+        )
 
     password_input = st.text_input("Access Password", type="password")
     if st.button("Login"):
-        if hmac.compare_digest(password_input.encode(), correct_password.encode()):
+        if not correct_password:
+            st.error("비밀번호가 설정되지 않아 로그인할 수 없어요.")
+        elif hmac.compare_digest(password_input.encode(), correct_password.encode()):
             st.session_state.authenticated = True
             st.rerun()
         else:
